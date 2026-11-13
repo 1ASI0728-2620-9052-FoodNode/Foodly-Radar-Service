@@ -1,0 +1,80 @@
+# Evidencia PR-05
+# Comando : scripts/pr05-consumer-down.sh
+# Fecha   : 2026-11-13 17:22:33 -0500
+# Imagen  : sha256:4285b6028ac6427296c9dfb9c785b0b62a005ab62b3a3eec7347457fc8bec478 creada 2026-11-13T22:14:43.31454826Z
+# ---------------------------------------------------------------
+=== PR-05: Radar caído con eventos pendientes ===
+[17:22:33] Levantando redis, rabbitmq y radar...
+ Network foodly-network Creating 
+ Network foodly-network Created 
+ Container foodly-radar-rabbitmq-1 Creating 
+ Container foodly-radar-redis-1 Creating 
+ Container foodly-radar-redis-1 Created 
+ Container foodly-radar-rabbitmq-1 Created 
+ Container foodly-radar-radar-1 Creating 
+ Container foodly-radar-radar-1 Created 
+ Container foodly-radar-rabbitmq-1 Starting 
+ Container foodly-radar-redis-1 Starting 
+ Container foodly-radar-redis-1 Started 
+ Container foodly-radar-rabbitmq-1 Started 
+ Container foodly-radar-rabbitmq-1 Waiting 
+ Container foodly-radar-redis-1 Waiting 
+ Container foodly-radar-redis-1 Healthy 
+ Container foodly-radar-rabbitmq-1 Healthy 
+ Container foodly-radar-radar-1 Starting 
+ Container foodly-radar-radar-1 Started 
+ Container foodly-radar-redis-1 Waiting 
+ Container foodly-radar-rabbitmq-1 Waiting 
+ Container foodly-radar-radar-1 Waiting 
+ Container foodly-radar-redis-1 Healthy 
+ Container foodly-radar-rabbitmq-1 Healthy 
+ Container foodly-radar-radar-1 Healthy 
+[17:22:52] Preparando el estado inicial (borra los huariques «seed-*» y vacía la cola de Radar)...
+[17:22:52] 1/6 Línea base: 20 eventos HuariqueRegistered (versión 1)
+[17:23:00]     20 de 20 huariques indexados.
+[17:23:00] 2/6 Deteniendo Radar...
+ Container foodly-radar-radar-1 Stopping 
+ Container foodly-radar-radar-1 Stopped 
+[17:23:01]     FALLA: Radar detenido a las 17:23:01.
+[17:23:01] 3/6 Publicando 20 eventos (LocationUpdated y OpeningStatusChanged, versión 2) con Radar caído...
+[17:23:15]     Mensajes esperando en la cola: 20. Consumidores conectados: 0.
+  [PASA]  los 20 eventos esperan en la cola durable mientras Radar está caído
+  [PASA]  no hay consumidores mientras Radar está caído
+  [PASA]  Redis no cambió mientras Radar estuvo caído
+[17:23:16] 4/6 Levantando Radar...
+ Container foodly-radar-redis-1 Waiting 
+ Container foodly-radar-rabbitmq-1 Waiting 
+ Container foodly-radar-rabbitmq-1 Healthy 
+ Container foodly-radar-redis-1 Healthy 
+ Container foodly-radar-radar-1 Starting 
+ Container foodly-radar-radar-1 Started 
+[17:23:17]     RECUPERACIÓN: Radar iniciado a las 17:23:17.
+[17:23:26]     Eventos aplicados: 20 de 20.
+  [PASA]  se aplicaron 20 de 20 eventos
+  [PASA]  los valores en Redis coinciden con los esperados (coordenadas y estado)
+[17:23:27] 5/6 Republicando los mismos 20 eventos...
+[17:24:15]     Eventos descartados por versión repetida: 20 de 20.
+  [PASA]  Redis no cambió al republicar (hashes y sets idénticos, incluido updatedAt)
+  [PASA]  los 20 eventos republicados se descartaron por versión
+  [PASA]  0 duplicados en los sets de celdas
+[17:24:30] 6/6 Verificando la cola...
+  [PASA]  la cola radar.business-events queda en 0 (listos: 0, sin confirmar: 0)
+  [PASA]  la DLQ radar.business-events.dlq queda en 0 (mensajes: 0)
+
+=== Métricas ===
+  Huariques de prueba                         20
+  Hora de la falla (Radar detenido)           17:23:01
+  Hora de la recuperación (Radar iniciado)    17:23:17
+  Tiempo con Radar caído                      16 s
+  Eventos publicados con Radar caído          20
+  Mensajes en cola al reiniciar               20
+  Eventos aplicados tras la recuperación      20/20
+  Tiempo desde el reinicio hasta 20/20        9 s
+  Eventos republicados descartados            20/20 (en 10 s)
+  Duplicados en Redis                         0
+  Cola radar.business-events   0 listos, 0 sin confirmar
+  DLQ  radar.business-events.dlq   0
+
+RESULTADO: PR-05 APROBADA
+# ---------------------------------------------------------------
+# Código de salida: 0

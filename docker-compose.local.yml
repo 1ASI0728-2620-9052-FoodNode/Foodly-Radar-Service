@@ -1,0 +1,62 @@
+# Radar y sus dependencias para desarrollo local.
+#
+#   docker compose -f docker-compose.local.yml up -d --build --wait
+#
+# Los puertos se publican solo en 127.0.0.1. Se pueden cambiar con las variables de abajo.
+
+name: foodly-radar
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
+    networks:
+      - foodly-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "127.0.0.1:${RABBITMQ_HOST_PORT:-5672}:5672"
+      - "127.0.0.1:${RABBITMQ_MANAGEMENT_HOST_PORT:-15672}:15672"
+    networks:
+      - foodly-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  # Se llama "radar" para que el comando sea «docker compose stop radar».
+  radar:
+    build:
+      context: .
+    image: foodly/radar-service:local
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${RADAR_HOST_PORT:-8080}:8080"
+    environment:
+      SERVER_PORT: "8080"
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      # Solo para desarrollo local. En otros entornos, el mismo secreto que usa IAM.
+      JWT_SECRET: ${JWT_SECRET:-local-dev-only-secret-change-me-0123456789}
+      RADAR_H3_RESOLUTION: ${RADAR_H3_RESOLUTION:-9}
+      RADAR_MAX_K_RING: ${RADAR_MAX_K_RING:-5}
+    networks:
+      - foodly-network
+    restart: unless-stopped
+
+networks:
+  foodly-network:
+    name: foodly-network

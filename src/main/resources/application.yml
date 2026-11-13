@@ -1,0 +1,68 @@
+# Toda la configuración se lee de variables de entorno.
+# Perfil por defecto: sin valores locales; REDIS_URL, RABBITMQ_URL y JWT_SECRET son obligatorias.
+# Perfil "local": dependencias en Docker Compose (ver el segundo documento).
+
+spring:
+  application:
+    name: radar-service
+  rabbitmq:
+    # amqp://usuario:contraseña@host:5672/vhost, o amqps://... con TLS (CloudAMQP).
+    addresses: ${RABBITMQ_URL}
+    listener:
+      simple:
+        # Ack manual: el listener confirma solo después de actualizar Redis.
+        acknowledge-mode: manual
+        # Un evento a la vez, en orden de llegada.
+        prefetch: 1
+        concurrency: 1
+        max-concurrency: 1
+        # Los rechazos van a la DLQ, no vuelven a la cola.
+        default-requeue-rejected: false
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+radar:
+  h3:
+    resolution: ${RADAR_H3_RESOLUTION:9}
+  max-k-ring: ${RADAR_MAX_K_RING:5}
+  events:
+    # Reintento en memoria de un evento antes de mandarlo a la DLQ.
+    max-attempts: ${RADAR_EVENTS_MAX_ATTEMPTS:3}
+    initial-backoff-ms: ${RADAR_EVENTS_INITIAL_BACKOFF_MS:200}
+    backoff-multiplier: ${RADAR_EVENTS_BACKOFF_MULTIPLIER:2.0}
+  redis:
+    url: ${REDIS_URL}
+    command-timeout-ms: ${REDIS_COMMAND_TIMEOUT_MS:2000}
+  security:
+    jwt:
+      # Mismo secreto que usa IAM para firmar (mínimo 32 bytes, se usa como texto UTF-8).
+      secret: ${JWT_SECRET}
+      user-id-claim: ${JWT_USER_ID_CLAIM:sub}
+      role-claim: ${JWT_ROLE_CLAIM:role}
+
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  rabbitmq:
+    addresses: ${RABBITMQ_URL:amqp://guest:guest@localhost:5672}
+
+radar:
+  redis:
+    url: ${REDIS_URL:redis://localhost:6379}
+  security:
+    jwt:
+      # Solo para desarrollo local. No usar fuera del perfil "local".
+      secret: ${JWT_SECRET:local-dev-only-secret-change-me-0123456789}
