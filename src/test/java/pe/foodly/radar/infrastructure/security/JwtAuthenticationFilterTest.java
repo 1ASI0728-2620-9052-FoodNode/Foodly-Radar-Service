@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.jsonwebtoken.Jwts;
+import java.util.Base64;
 import java.util.Date;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
@@ -17,8 +18,11 @@ import pe.foodly.radar.support.TestJwt;
 
 class JwtAuthenticationFilterTest {
 
-    private final JwtAuthenticationFilter filter =
-            new JwtAuthenticationFilter(new JwtProperties(TestJwt.SECRET, "sub", "role"));
+    private final JwtAuthenticationFilter filter = new JwtAuthenticationFilter(properties(TestJwt.SECRET_BASE64));
+
+    private static JwtProperties properties(String secretBase64) {
+        return new JwtProperties(secretBase64, TestJwt.ISSUER, TestJwt.AUDIENCE, "sub", "role");
+    }
 
     @AfterEach
     void clearContext() {
@@ -79,6 +83,12 @@ class JwtAuthenticationFilterTest {
     }
 
     @Test
+    void tokenSignedWithTheBase64TextAsKeyIsRejected() throws Exception {
+        // La clave se decodifica de Base64: firmar con el texto Base64 como bytes UTF-8 no vale.
+        assertThat(run("Bearer " + TestJwt.signedWithTheBase64TextAsKey())).isNull();
+    }
+
+    @Test
     void expiredTokenIsRejected() throws Exception {
         assertThat(run("Bearer " + TestJwt.expired())).isNull();
     }
@@ -88,7 +98,7 @@ class JwtAuthenticationFilterTest {
         String token = TestJwt.explorer();
         String[] parts = token.split("\\.");
         // Cambia el payload (ahora el rol dice HUARIQUE_OWNER) y deja la firma original.
-        String forgedPayload = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+        String forgedPayload = Base64.getUrlEncoder().withoutPadding().encodeToString(
                 "{\"sub\":\"user-1\",\"role\":\"HUARIQUE_OWNER\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
 
         assertThat(run("Bearer " + parts[0] + "." + forgedPayload + "." + parts[2])).isNull();
@@ -97,10 +107,51 @@ class JwtAuthenticationFilterTest {
     @Test
     void unsignedTokenWithAlgNoneIsRejected() throws Exception {
         String unsigned = Jwts.builder().subject("user-1").claim("role", TestJwt.EXPLORER)
+                .issuer(TestJwt.ISSUER).audience().add(TestJwt.AUDIENCE).and()
                 .expiration(new Date(System.currentTimeMillis() + 60_000)).compact();
 
         assertThat(run("Bearer " + unsigned)).isNull();
     }
+
+    // ---- iss y aud (contrato JWT v1 de IAM) ----
+
+    @Test
+    void tokenWithAnotherIssuerIsRejected() throws Exception {
+        assertThat(run("Bearer " + TestJwt.withIssuer("otro-emisor"))).isNull();
+    }
+
+    @Test
+    void tokenWithoutIssuerIsRejected() throws Exception {
+        assertThat(run("Bearer " + TestJwt.withIssuer(null))).isNull();
+    }
+
+    @Test
+    void tokenWithoutAudienceIsRejected() throws Exception {
+        assertThat(run("Bearer " + TestJwt.withAudience(null))).isNull();
+    }
+
+    @Test
+    void tokenWhoseAudienceDoesNotIncludeRadarIsRejected() throws Exception {
+        assertThat(run("Bearer " + TestJwt.withAudience(List.of("foodly-iam", "foodly-business")))).isNull();
+    }
+
+    @Test
+    void tokenWhoseAudienceIncludesRadarAmongOthersIsAccepted() throws Exception {
+        assertThat(run("Bearer " + TestJwt.withAudience(List.of("foodly-business", "foodly-radar")))).isNotNull();
+        assertThat(run("Bearer " + TestJwt.withAudience(List.of("foodly-radar")))).isNotNull();
+    }
+
+    @Test
+    void issuerAndAudienceAreConfigurable() throws Exception {
+        JwtAuthenticationFilter custom = new JwtAuthenticationFilter(
+                new JwtProperties(TestJwt.SECRET_BASE64, "otro-emisor", "foodly-messaging", "sub", "role"));
+
+        assertThat(run(custom, "Bearer " + TestJwt.withIssuer("otro-emisor"))).isNotNull();
+        // El token por defecto tiene iss=foodly-iam: ya no sirve con ese emisor.
+        assertThat(run(custom, "Bearer " + TestJwt.explorer())).isNull();
+    }
+
+    // ---- claims de usuario y rol ----
 
     @Test
     void tokenWithoutTheUserIdClaimIsRejected() throws Exception {
@@ -117,8 +168,8 @@ class JwtAuthenticationFilterTest {
 
     @Test
     void claimNamesAreConfigurable() throws Exception {
-        JwtAuthenticationFilter custom =
-                new JwtAuthenticationFilter(new JwtProperties(TestJwt.SECRET, "uid", "rol"));
+        JwtAuthenticationFilter custom = new JwtAuthenticationFilter(
+                new JwtProperties(TestJwt.SECRET_BASE64, TestJwt.ISSUER, TestJwt.AUDIENCE, "uid", "rol"));
 
         Authentication auth = run(custom, "Bearer " + TestJwt.withClaims("uid", "abc-123", "rol", TestJwt.OWNER));
 
@@ -137,11 +188,44 @@ class JwtAuthenticationFilterTest {
                 .containsExactlyInAnyOrder("ROLE_GASTRONOMIC_EXPLORER", "ROLE_HUARIQUE_OWNER");
     }
 
+    // ---- la clave: Base64 de al menos 32 bytes ----
+
     @Test
-    void aMissingOrShortSecretFailsFast() {
-        assertThatThrownBy(() -> new JwtAuthenticationFilter(new JwtProperties(null, "sub", "role")))
-                .isInstanceOf(IllegalStateException.class).hasMessageContaining("JWT_SECRET");
-        assertThatThrownBy(() -> new JwtAuthenticationFilter(new JwtProperties("corto", "sub", "role")))
-                .isInstanceOf(IllegalStateException.class).hasMessageContaining("JWT_SECRET");
+    void aMissingOrBlankSecretFailsFast() {
+        assertThatThrownBy(() -> new JwtAuthenticationFilter(properties(null)))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("JWT_SECRET_BASE64");
+        assertThatThrownBy(() -> new JwtAuthenticationFilter(properties("  ")))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("JWT_SECRET_BASE64");
+    }
+
+    @Test
+    void aSecretShorterThan32DecodedBytesFailsFast() {
+        String thirtyOneBytes = Base64.getEncoder().encodeToString(new byte[31]);
+
+        assertThatThrownBy(() -> new JwtAuthenticationFilter(properties(thirtyOneBytes)))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("32 bytes");
+    }
+
+    @Test
+    void aSecretOfExactly32DecodedBytesIsAccepted() {
+        String thirtyTwoBytes = Base64.getEncoder().encodeToString(new byte[32]);
+
+        assertThat(new JwtAuthenticationFilter(properties(thirtyTwoBytes))).isNotNull();
+    }
+
+    @Test
+    void aSecretThatIsNotBase64FailsFast() {
+        assertThatThrownBy(() -> new JwtAuthenticationFilter(properties("esto no es base64 ***")))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("Base64");
+    }
+
+    @Test
+    void aBlankIssuerOrAudienceFailsFast() {
+        assertThatThrownBy(() -> new JwtAuthenticationFilter(
+                new JwtProperties(TestJwt.SECRET_BASE64, " ", TestJwt.AUDIENCE, "sub", "role")))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("JWT_ISSUER");
+        assertThatThrownBy(() -> new JwtAuthenticationFilter(
+                new JwtProperties(TestJwt.SECRET_BASE64, TestJwt.ISSUER, null, "sub", "role")))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("JWT_AUDIENCE");
     }
 }

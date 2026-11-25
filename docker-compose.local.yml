@@ -44,13 +44,17 @@ services:
       rabbitmq:
         condition: service_healthy
     ports:
-      - "127.0.0.1:${RADAR_HOST_PORT:-8080}:8080"
+      - "127.0.0.1:${RADAR_HOST_PORT:-8082}:8082"
     environment:
-      SERVER_PORT: "8080"
+      SERVER_PORT: "8082"
       REDIS_URL: redis://redis:6379
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
-      # Solo para desarrollo local. En otros entornos, el mismo secreto que usa IAM.
-      JWT_SECRET: ${JWT_SECRET:-local-dev-only-secret-change-me-0123456789}
+      # La misma clave Base64 que usa IAM (JWT_SECRET_BASE64). Sin valor por defecto: se toma de .env o del
+      # entorno (ver .env.example). Si falta, Radar no arranca; Redis y RabbitMQ sí.
+      JWT_SECRET_BASE64: ${JWT_SECRET_BASE64:-}
+      JWT_ISSUER: ${JWT_ISSUER:-foodly-iam}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-foodly-radar}
+      BUSINESS_EVENTS_EXCHANGE: ${BUSINESS_EVENTS_EXCHANGE:-foodly.business}
       RADAR_H3_RESOLUTION: ${RADAR_H3_RESOLUTION:-9}
       RADAR_MAX_K_RING: ${RADAR_MAX_K_RING:-5}
     networks:

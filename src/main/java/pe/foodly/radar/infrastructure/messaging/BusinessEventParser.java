@@ -7,16 +7,18 @@ import java.util.Locale;
 import org.springframework.stereotype.Component;
 import pe.foodly.radar.application.events.HuariqueRegisteredEvent;
 import pe.foodly.radar.application.events.HuariqueUpdatedEvent;
-import pe.foodly.radar.application.events.LocationUpdatedEvent;
 import pe.foodly.radar.application.events.OpeningStatusChangedEvent;
 import pe.foodly.radar.domain.model.valueobjects.AvailabilityStatus;
 
 /**
- * Deserializa el sobre de Business y lo traduce a los eventos de la capa de aplicación.
+ * Deserializa el sobre de Business v1 y lo traduce a los eventos de la capa de aplicación.
  * Los mensajes de error no incluyen el contenido del mensaje.
  */
 @Component
 public class BusinessEventParser {
+
+    /** Única versión del contrato de Business que Radar entiende. */
+    public static final int SUPPORTED_SCHEMA_VERSION = 1;
 
     private final ObjectMapper objectMapper;
 
@@ -24,7 +26,7 @@ public class BusinessEventParser {
         this.objectMapper = objectMapper;
     }
 
-    /** Lee el sobre. Solo exige que sea un JSON con {@code eventType}; el resto se valida según el tipo. */
+    /** Lee el sobre. Solo exige que sea un JSON con {@code type}; el resto se valida según el tipo. */
     public BusinessEventEnvelope parse(byte[] body) {
         if (body == null || body.length == 0) {
             throw new MalformedBusinessEventException("el mensaje está vacío");
@@ -37,77 +39,82 @@ public class BusinessEventParser {
         } catch (IOException e) {
             throw new MalformedBusinessEventException("no se pudo leer el mensaje", e);
         }
-        if (envelope == null || isBlank(envelope.eventType())) {
-            throw new MalformedBusinessEventException("el sobre no trae eventType");
+        if (envelope == null || isBlank(envelope.type())) {
+            throw new MalformedBusinessEventException("el sobre no trae type");
         }
         return envelope;
     }
 
-    /** Valida lo que hace falta para comparar versiones: huariqueId y version. */
+    /**
+     * Valida lo que hace falta para comparar versiones: schemaVersion, huariqueId y aggregateVersion.
+     * La versión del agregado empieza en 0, así que 0 es válida.
+     */
     public long requireIdentity(BusinessEventEnvelope envelope) {
+        if (envelope.schemaVersion() == null || envelope.schemaVersion() != SUPPORTED_SCHEMA_VERSION) {
+            throw new MalformedBusinessEventException("el sobre no trae una schemaVersion soportada");
+        }
         if (isBlank(envelope.huariqueId())) {
             throw new MalformedBusinessEventException("el sobre no trae huariqueId");
         }
-        if (envelope.version() == null || envelope.version() < 0) {
-            throw new MalformedBusinessEventException("el sobre no trae una version válida");
+        if (envelope.aggregateVersion() == null || envelope.aggregateVersion() < 0) {
+            throw new MalformedBusinessEventException("el sobre no trae una aggregateVersion válida");
         }
-        return envelope.version();
+        return envelope.aggregateVersion();
     }
 
     public HuariqueRegisteredEvent toRegistered(BusinessEventEnvelope envelope) {
-        BusinessEventEnvelope.Payload payload = payloadOf(envelope);
+        BusinessEventEnvelope.Data data = dataOf(envelope);
+        BusinessEventEnvelope.Location location = locationOf(data);
         return new HuariqueRegisteredEvent(envelope.eventId(), envelope.huariqueId(), requireIdentity(envelope),
-                envelope.occurredAt(), requireNumber(payload.latitude(), "latitude"),
-                requireNumber(payload.longitude(), "longitude"), statusOf(payload));
+                envelope.occurredAt(), requireNumber(location.latitude(), "location.latitude"),
+                requireNumber(location.longitude(), "location.longitude"), statusOf(data));
     }
 
     public HuariqueUpdatedEvent toUpdated(BusinessEventEnvelope envelope) {
-        BusinessEventEnvelope.Payload payload = payloadOf(envelope);
+        BusinessEventEnvelope.Data data = dataOf(envelope);
+        BusinessEventEnvelope.Location location = locationOf(data);
         return new HuariqueUpdatedEvent(envelope.eventId(), envelope.huariqueId(), requireIdentity(envelope),
-                envelope.occurredAt(), requireNumber(payload.latitude(), "latitude"),
-                requireNumber(payload.longitude(), "longitude"), statusOf(payload));
-    }
-
-    public LocationUpdatedEvent toLocationUpdated(BusinessEventEnvelope envelope) {
-        BusinessEventEnvelope.Payload payload = payloadOf(envelope);
-        return new LocationUpdatedEvent(envelope.eventId(), envelope.huariqueId(), requireIdentity(envelope),
-                envelope.occurredAt(), requireNumber(payload.latitude(), "latitude"),
-                requireNumber(payload.longitude(), "longitude"), statusOf(payload));
+                envelope.occurredAt(), requireNumber(location.latitude(), "location.latitude"),
+                requireNumber(location.longitude(), "location.longitude"), statusOf(data));
     }
 
     public OpeningStatusChangedEvent toOpeningStatusChanged(BusinessEventEnvelope envelope) {
-        BusinessEventEnvelope.Payload payload = payloadOf(envelope);
+        BusinessEventEnvelope.Data data = dataOf(envelope);
         return new OpeningStatusChangedEvent(envelope.eventId(), envelope.huariqueId(), requireIdentity(envelope),
-                envelope.occurredAt(), statusOf(payload));
+                envelope.occurredAt(), statusOf(data));
     }
 
-    private static BusinessEventEnvelope.Payload payloadOf(BusinessEventEnvelope envelope) {
-        if (envelope.payload() == null) {
-            throw new MalformedBusinessEventException("el sobre no trae payload");
+    private static BusinessEventEnvelope.Data dataOf(BusinessEventEnvelope envelope) {
+        if (envelope.data() == null) {
+            throw new MalformedBusinessEventException("el sobre no trae data");
         }
-        return envelope.payload();
+        return envelope.data();
+    }
+
+    private static BusinessEventEnvelope.Location locationOf(BusinessEventEnvelope.Data data) {
+        if (data.location() == null) {
+            throw new MalformedBusinessEventException("data no trae location");
+        }
+        return data.location();
     }
 
     private static double requireNumber(Double value, String field) {
         if (value == null || value.isNaN() || value.isInfinite()) {
-            throw new MalformedBusinessEventException("el payload no trae " + field + " válido");
+            throw new MalformedBusinessEventException("data no trae " + field + " válido");
         }
         return value;
     }
 
-    /** {@code status} (ACTIVE o INACTIVE) o, si no viene, {@code isOpen} (true es ACTIVE). */
-    private static AvailabilityStatus statusOf(BusinessEventEnvelope.Payload payload) {
-        if (!isBlank(payload.status())) {
-            try {
-                return AvailabilityStatus.valueOf(payload.status().trim().toUpperCase(Locale.ROOT));
-            } catch (IllegalArgumentException e) {
-                throw new MalformedBusinessEventException("el payload trae un status desconocido");
-            }
+    /** {@code data.openStatus} de Business: {@code OPEN} es ACTIVE y {@code CLOSED} es INACTIVE. */
+    private static AvailabilityStatus statusOf(BusinessEventEnvelope.Data data) {
+        if (isBlank(data.openStatus())) {
+            throw new MalformedBusinessEventException("data no trae openStatus");
         }
-        if (payload.isOpen() != null) {
-            return payload.isOpen() ? AvailabilityStatus.ACTIVE : AvailabilityStatus.INACTIVE;
-        }
-        throw new MalformedBusinessEventException("el payload no trae status ni isOpen");
+        return switch (data.openStatus().trim().toUpperCase(Locale.ROOT)) {
+            case "OPEN" -> AvailabilityStatus.ACTIVE;
+            case "CLOSED" -> AvailabilityStatus.INACTIVE;
+            default -> throw new MalformedBusinessEventException("data trae un openStatus desconocido");
+        };
     }
 
     private static boolean isBlank(String value) {

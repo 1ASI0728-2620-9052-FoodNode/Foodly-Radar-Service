@@ -40,28 +40,41 @@ cleanup_seed() {
   redis_cli eval "$lua" 0 $(seed_ids) >/dev/null
 }
 
-ROUTING_REGISTERED="huarique.registered"
-ROUTING_LOCATION_UPDATED="huarique.location-updated"
-ROUTING_OPENING_STATUS="huarique.opening-status-changed"
+# Contrato de Business v1 (Foodly-Business-Service/docs/contracts.md): exchange foodly.business,
+# routing key business.<Tipo>, sobre { eventId, type, schemaVersion, huariqueId, aggregateVersion, occurredAt, data }.
+ROUTING_REGISTERED="business.HuariqueRegistrado"
+ROUTING_UPDATED="business.PerfilDelHuariqueActualizado"
+ROUTING_OPENING_STATUS="business.EstadoAbiertoCerradoCambiado"
 
 now_iso() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
+# Radar guarda ACTIVE/INACTIVE; Business publica OPEN/CLOSED.
+open_status() { if [ "$1" = "ACTIVE" ]; then printf 'OPEN'; else printf 'CLOSED'; fi; }
+
+# snapshot <id> <lat> <lng> <status ACTIVE|INACTIVE> <aggregateVersion>
+# Es el huarique completo, como lo publica Business en «data» (Radar solo lee location y openStatus).
+snapshot() {
+  printf '{"id":"%s","ownerId":"seed-owner","name":"Huarique %s","address":"Lima","cuisineType":"CRIOLLA","priceRange":{"minimum":10,"maximum":50},"location":{"latitude":%s,"longitude":%s},"openStatus":"%s","tags":[],"openingHours":[],"images":[],"version":%s}' \
+    "$1" "$1" "$2" "$3" "$(open_status "$4")" "$5"
+}
+
 # Los eventId son deterministas: republicar el mismo evento es exactamente el mismo mensaje.
 
-# registered_event <id> <lat> <lng> <status>  (versión 1)
+# registered_event <id> <lat> <lng> <status>  (aggregateVersion 0: Business empieza en 0)
 registered_event() {
-  printf '{"eventId":"seed-registered-%s-v1","eventType":"HuariqueRegistered","huariqueId":"%s","version":1,"occurredAt":"%s","payload":{"latitude":%s,"longitude":%s,"status":"%s"}}' \
-    "$1" "$1" "$(now_iso)" "$2" "$3" "$4"
+  printf '{"eventId":"seed-registered-%s-v0","type":"HuariqueRegistrado","schemaVersion":1,"huariqueId":"%s","aggregateVersion":0,"occurredAt":"%s","data":%s}' \
+    "$1" "$1" "$(now_iso)" "$(snapshot "$1" "$2" "$3" "$4" 0)"
 }
 
-# location_updated_event <id> <lat> <lng> <status> <version>
-location_updated_event() {
-  printf '{"eventId":"seed-location-%s-v%s","eventType":"LocationUpdated","huariqueId":"%s","version":%s,"occurredAt":"%s","payload":{"latitude":%s,"longitude":%s,"status":"%s"}}' \
-    "$1" "$5" "$1" "$5" "$(now_iso)" "$2" "$3" "$4"
+# profile_updated_event <id> <lat> <lng> <status> <aggregateVersion>
+# El cambio de ubicación llega aquí: Business no tiene un evento de ubicación aparte.
+profile_updated_event() {
+  printf '{"eventId":"seed-profile-%s-v%s","type":"PerfilDelHuariqueActualizado","schemaVersion":1,"huariqueId":"%s","aggregateVersion":%s,"occurredAt":"%s","data":%s}' \
+    "$1" "$5" "$1" "$5" "$(now_iso)" "$(snapshot "$1" "$2" "$3" "$4" "$5")"
 }
 
-# opening_status_event <id> <status> <version>
+# opening_status_event <id> <lat> <lng> <status> <aggregateVersion>
 opening_status_event() {
-  printf '{"eventId":"seed-opening-%s-v%s","eventType":"OpeningStatusChanged","huariqueId":"%s","version":%s,"occurredAt":"%s","payload":{"status":"%s"}}' \
-    "$1" "$3" "$1" "$3" "$(now_iso)" "$2"
+  printf '{"eventId":"seed-opening-%s-v%s","type":"EstadoAbiertoCerradoCambiado","schemaVersion":1,"huariqueId":"%s","aggregateVersion":%s,"occurredAt":"%s","data":%s}' \
+    "$1" "$5" "$1" "$5" "$(now_iso)" "$(snapshot "$1" "$2" "$3" "$4" "$5")"
 }

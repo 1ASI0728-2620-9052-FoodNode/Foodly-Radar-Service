@@ -4,13 +4,13 @@ import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.JwtParser;
 import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.io.Decoders;
 import io.jsonwebtoken.security.Keys;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
@@ -26,10 +26,14 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
- * Valida el JWT emitido por IAM (HMAC con clave compartida, firma y expiración) y, si es válido, deja al
- * usuario autenticado con su id y su rol (DD-06, QA-1, 5.1.4). Un token ausente o inválido no se rechaza
- * aquí: la petición sigue sin autenticar y decide la configuración de rutas (401 en las protegidas,
- * acceso normal en las públicas).
+ * Valida el JWT emitido por IAM (HS256 con clave compartida, firma, expiración, {@code iss} y {@code aud}) y, si es
+ * válido, deja al usuario autenticado con su id y su rol (DD-06, QA-1, 5.1.4). Un token ausente o inválido no se
+ * rechaza aquí: la petición sigue sin autenticar y decide la configuración de rutas (401 en las protegidas, acceso
+ * normal en las públicas).
+ *
+ * <p>La clave llega en Base64 ({@code JWT_SECRET_BASE64}) y se decodifica con {@link Decoders#BASE64}, igual que
+ * IAM. El emisor debe ser exactamente {@link JwtProperties#issuer()} y {@code aud} debe incluir
+ * {@link JwtProperties#audience()}.
  *
  * <p>No es un bean: lo crea {@link SecurityConfig} para que solo se ejecute dentro de la cadena de seguridad.
  */
@@ -46,16 +50,40 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     private final String roleClaim;
 
     public JwtAuthenticationFilter(JwtProperties properties) {
-        String secret = properties.secret();
-        if (secret == null || secret.getBytes(StandardCharsets.UTF_8).length < MIN_SECRET_BYTES) {
-            throw new IllegalStateException(
-                    "JWT_SECRET es obligatorio y debe tener al menos " + MIN_SECRET_BYTES + " bytes.");
-        }
-        // El secreto se usa como bytes UTF-8 (no Base64). Confirmar con quien implementa IAM.
-        SecretKey key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
-        this.parser = Jwts.parser().verifyWith(key).build();
+        this.parser = Jwts.parser()
+                .verifyWith(signingKey(properties.secretBase64()))
+                .requireIssuer(requireText(properties.issuer(), "JWT_ISSUER"))
+                .requireAudience(requireText(properties.audience(), "JWT_AUDIENCE"))
+                .build();
         this.userIdClaim = properties.userIdClaim();
         this.roleClaim = properties.roleClaim();
+    }
+
+    /** Decodifica la clave como IAM ({@code Decoders.BASE64}) y exige al menos 32 bytes. */
+    private static SecretKey signingKey(String secretBase64) {
+        if (secretBase64 == null || secretBase64.isBlank()) {
+            throw new IllegalStateException(
+                    "JWT_SECRET_BASE64 es obligatorio y debe tener al menos " + MIN_SECRET_BYTES + " bytes.");
+        }
+        byte[] keyBytes;
+        try {
+            keyBytes = Decoders.BASE64.decode(secretBase64.trim());
+        } catch (RuntimeException e) {
+            throw new IllegalStateException("JWT_SECRET_BASE64 debe estar en Base64 válido.", e);
+        }
+        if (keyBytes.length < MIN_SECRET_BYTES) {
+            throw new IllegalStateException(
+                    "JWT_SECRET_BASE64 es obligatorio y debe tener al menos " + MIN_SECRET_BYTES
+                            + " bytes una vez decodificado.");
+        }
+        return Keys.hmacShaKeyFor(keyBytes);
+    }
+
+    private static String requireText(String value, String variable) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException(variable + " es obligatorio.");
+        }
+        return value.trim();
     }
 
     @Override
@@ -83,7 +111,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     userId.toString(), null, authoritiesOf(claims.get(roleClaim))));
             SecurityContextHolder.setContext(context);
         } catch (JwtException | IllegalArgumentException e) {
-            // Nunca se registra el token, solo el tipo de fallo.
+            // Nunca se registra el token, solo el tipo de fallo (firma, expiración, iss o aud).
             log.debug("Token rechazado: {}", e.getClass().getSimpleName());
         }
     }

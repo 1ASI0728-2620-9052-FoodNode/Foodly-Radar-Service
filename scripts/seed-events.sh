@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Publica 20 eventos HuariqueRegistered (huariques de Miraflores, Barranco, Surquillo y Lince) en el exchange
-# de eventos de Business, usando la API HTTP de management de RabbitMQ. No necesita rabbitmqadmin.
+# Publica 20 eventos HuariqueRegistrado (huariques de Miraflores, Barranco, Surquillo y Lince) en el exchange
+# foodly.business, con el contrato de Business v1 (routing key business.HuariqueRegistrado, aggregateVersion 0),
+# usando la API HTTP de management de RabbitMQ. No necesita rabbitmqadmin.
 #
 # Uso:  scripts/seed-events.sh [--reset] [--no-wait]
 #   --reset    borra antes los huariques de prueba («seed-*») de Redis
 #   --no-wait  no espera a que Radar los indexe
 #
-# Variables: MGMT_URL (http://localhost:15672), RABBIT_USER y RABBIT_PASSWORD (guest), COMPOSE_FILE.
-# Es seguro ejecutarlo varias veces: los eventos son siempre los mismos (versión 1) y Radar descarta
+# Variables: MGMT_URL (http://localhost:15672), RABBIT_USER y RABBIT_PASSWORD (guest), COMPOSE_FILE y
+# BUSINESS_EVENTS_EXCHANGE (foodly.business).
+# Es seguro ejecutarlo varias veces: los eventos son siempre los mismos (aggregateVersion 0) y Radar descarta
 # los repetidos. Por eso, si los huariques ya tienen una versión mayor (por ejemplo, después de la prueba
 # PR-05), hay que usar --reset para volver a sembrarlos.
 
@@ -36,7 +38,7 @@ if [ "$RESET" = true ]; then
   cleanup_seed
 fi
 
-log "Publicando ${#SEED_HUARIQUES[@]} eventos HuariqueRegistered en $EXCHANGE..."
+log "Publicando ${#SEED_HUARIQUES[@]} eventos HuariqueRegistrado en $EXCHANGE..."
 for row in "${SEED_HUARIQUES[@]}"; do
   IFS='|' read -r id district lat lng status <<<"$row"
   publish "$ROUTING_REGISTERED" "$(registered_event "$id" "$lat" "$lng" "$status")"

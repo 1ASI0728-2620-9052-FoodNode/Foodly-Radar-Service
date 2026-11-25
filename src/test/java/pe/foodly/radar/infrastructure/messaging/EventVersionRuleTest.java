@@ -21,6 +21,12 @@ class EventVersionRuleTest {
         assertThat(EventVersionRule.isStale(Optional.of(stored), event)).isFalse();
     }
 
+    /** La aggregateVersion de Business empieza en 0: ese primer evento nunca es obsoleto. */
+    @Test
+    void theFirstEventWithVersionZeroIsNotStaleWhenNothingIsStored() {
+        assertThat(EventVersionRule.isStale(Optional.empty(), 0)).isFalse();
+    }
+
     @Test
     void withNoStoredVersionEveryEventIsApplied() {
         assertThat(EventVersionRule.isStale(Optional.empty(), 0)).isFalse();

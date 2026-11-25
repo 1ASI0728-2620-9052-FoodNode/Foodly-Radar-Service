@@ -31,11 +31,9 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import pe.foodly.radar.application.eventhandlers.HuariqueRegisteredEventHandler;
 import pe.foodly.radar.application.eventhandlers.HuariqueUpdatedEventHandler;
-import pe.foodly.radar.application.eventhandlers.LocationUpdatedEventHandler;
 import pe.foodly.radar.application.eventhandlers.OpeningStatusChangedEventHandler;
 import pe.foodly.radar.application.events.HuariqueRegisteredEvent;
 import pe.foodly.radar.application.events.HuariqueUpdatedEvent;
-import pe.foodly.radar.application.events.LocationUpdatedEvent;
 import pe.foodly.radar.application.events.OpeningStatusChangedEvent;
 import pe.foodly.radar.domain.model.valueobjects.AvailabilityStatus;
 import pe.foodly.radar.domain.model.valueobjects.HuariqueId;
@@ -47,13 +45,12 @@ class BusinessEventListenerTest {
 
     private static final long TAG = 7L;
     private static final HuariqueId ID = new HuariqueId("h-1");
+    private static final String OPEN_SNAPSHOT = snapshot("OPEN", -12.1219, -77.0297);
 
     @Mock
     private HuariqueRegisteredEventHandler registeredHandler;
     @Mock
     private HuariqueUpdatedEventHandler updatedHandler;
-    @Mock
-    private LocationUpdatedEventHandler locationUpdatedHandler;
     @Mock
     private OpeningStatusChangedEventHandler openingStatusChangedHandler;
     @Mock
@@ -69,8 +66,7 @@ class BusinessEventListenerTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules()
                 .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
         listener = new BusinessEventListener(new BusinessEventParser(mapper), registeredHandler, updatedHandler,
-                locationUpdatedHandler, openingStatusChangedHandler, versionStore,
-                new EventRetryProperties(3, 100, 2.0), sleeps::add);
+                openingStatusChangedHandler, versionStore, new EventRetryProperties(3, 100, 2.0), sleeps::add);
         when(versionStore.findVersion(ID)).thenReturn(Optional.empty());
     }
 
@@ -80,15 +76,24 @@ class BusinessEventListenerTest {
         return new Message(json.getBytes(StandardCharsets.UTF_8), properties);
     }
 
-    private static String registered(long version) {
-        return event("HuariqueRegistered", version,
-                "{ \"latitude\": -12.1219, \"longitude\": -77.0297, \"status\": \"ACTIVE\" }");
+    /** Snapshot de Business: incluye campos que Radar no usa. */
+    private static String snapshot(String openStatus, double latitude, double longitude) {
+        return """
+                { "id": "h-1", "ownerId": "owner-1", "name": "El Huarique", "address": "Lima 123",
+                  "cuisineType": "CRIOLLA", "priceRange": { "minimum": 10, "maximum": 50 },
+                  "location": { "latitude": %s, "longitude": %s }, "openStatus": "%s",
+                  "tags": [], "openingHours": [], "images": [], "version": 0 }""".formatted(latitude, longitude, openStatus);
     }
 
-    private static String event(String type, long version, String payload) {
+    private static String registered(long aggregateVersion) {
+        return event("HuariqueRegistrado", aggregateVersion, OPEN_SNAPSHOT);
+    }
+
+    private static String event(String type, long aggregateVersion, String data) {
         return """
-                { "eventId": "e-1", "eventType": "%s", "huariqueId": "h-1", "version": %d,
-                  "occurredAt": "2026-11-13T12:00:00Z", "payload": %s }""".formatted(type, version, payload);
+                { "eventId": "e-1", "type": "%s", "schemaVersion": 1, "huariqueId": "h-1",
+                  "aggregateVersion": %d, "occurredAt": "2026-11-24T20:00:00Z", "data": %s }"""
+                .formatted(type, aggregateVersion, data);
     }
 
     private void verifyAckedOnly() throws Exception {
@@ -111,36 +116,55 @@ class BusinessEventListenerTest {
 
         InOrder order = inOrder(registeredHandler, versionStore, channel);
         order.verify(registeredHandler).handle(new HuariqueRegisteredEvent("e-1", "h-1", 4,
-                Instant.parse("2026-11-13T12:00:00Z"), -12.1219, -77.0297, AvailabilityStatus.ACTIVE));
+                Instant.parse("2026-11-24T20:00:00Z"), -12.1219, -77.0297, AvailabilityStatus.ACTIVE));
         order.verify(versionStore).writeVersion(ID, 4);
         order.verify(channel).basicAck(TAG, false);
         verifyAckedOnly();
         assertThat(sleeps).isEmpty();
     }
 
+    /** aggregateVersion empieza en 0: la regla de versión no debe descartar el primer evento. */
     @Test
-    void appliesTheFirstEventOfAHuariqueThatHasNoStoredVersion() throws Exception {
+    void appliesTheFirstEventOfAHuariqueWhoseAggregateVersionIsZero() throws Exception {
         listener.onMessage(message(registered(0)), channel);
 
-        verify(registeredHandler).handle(any());
+        verify(registeredHandler).handle(any(HuariqueRegisteredEvent.class));
         verify(versionStore).writeVersion(ID, 0);
         verifyAckedOnly();
     }
 
     @Test
-    void dispatchesEachTypeToItsOwnHandler() throws Exception {
-        String coordinates = "{ \"latitude\": -12.15, \"longitude\": -77.02, \"status\": \"ACTIVE\" }";
+    void aRepeatedVersionZeroIsDiscardedOnceVersionZeroIsStored() throws Exception {
+        when(versionStore.findVersion(ID)).thenReturn(Optional.of(0L));
 
-        listener.onMessage(message(event("HuariqueUpdated", 1, coordinates)), channel);
+        listener.onMessage(message(registered(0)), channel);
+
+        verifyNoInteractions(registeredHandler);
+        verify(versionStore, never()).writeVersion(any(), anyLong());
+        verifyAckedOnly();
+    }
+
+    @Test
+    void versionOneSupersedesAStoredVersionZero() throws Exception {
+        when(versionStore.findVersion(ID)).thenReturn(Optional.of(0L));
+
+        listener.onMessage(message(event("PerfilDelHuariqueActualizado", 1, OPEN_SNAPSHOT)), channel);
+
         verify(updatedHandler).handle(any(HuariqueUpdatedEvent.class));
+        verify(versionStore).writeVersion(ID, 1);
+        verifyAckedOnly();
+    }
 
-        listener.onMessage(message(event("LocationUpdated", 2, coordinates)), channel);
-        verify(locationUpdatedHandler).handle(any(LocationUpdatedEvent.class));
+    @Test
+    void dispatchesEachTypeToItsOwnHandlerMappingOpenAndClosed() throws Exception {
+        listener.onMessage(message(event("PerfilDelHuariqueActualizado", 1, snapshot("CLOSED", -12.15, -77.02))), channel);
+        verify(updatedHandler).handle(new HuariqueUpdatedEvent("e-1", "h-1", 1,
+                Instant.parse("2026-11-24T20:00:00Z"), -12.15, -77.02, AvailabilityStatus.INACTIVE));
 
-        listener.onMessage(message(event("OpeningStatusChanged", 3, "{ \"isOpen\": false }")), channel);
+        listener.onMessage(message(event("EstadoAbiertoCerradoCambiado", 2, OPEN_SNAPSHOT)), channel);
         verify(openingStatusChangedHandler).handle(
-                new OpeningStatusChangedEvent("e-1", "h-1", 3, Instant.parse("2026-11-13T12:00:00Z"),
-                        AvailabilityStatus.INACTIVE));
+                new OpeningStatusChangedEvent("e-1", "h-1", 2, Instant.parse("2026-11-24T20:00:00Z"),
+                        AvailabilityStatus.ACTIVE));
 
         verifyNoInteractions(registeredHandler);
     }
@@ -172,20 +196,28 @@ class BusinessEventListenerTest {
     // ---- tipos que Radar no procesa ----
 
     @Test
-    void menuUpdatedIsAckedAndIgnoredWithoutTouchingRedis() throws Exception {
-        listener.onMessage(message(event("MenuUpdated", 5, "{ \"platos\": [] }")), channel);
+    void menuEventsAreAckedAndIgnoredWithoutTouchingRedis() throws Exception {
+        listener.onMessage(message(event("MenuCreado", 0, "{ \"categories\": [] }")), channel);
+        listener.onMessage(message(event("MenuActualizado", 1, "{ \"categories\": [] }")), channel);
 
-        verifyNoInteractions(registeredHandler, updatedHandler, locationUpdatedHandler,
-                openingStatusChangedHandler, versionStore);
-        verifyAckedOnly();
+        verifyNoInteractions(registeredHandler, updatedHandler, openingStatusChangedHandler, versionStore);
+        verify(channel, org.mockito.Mockito.times(2)).basicAck(TAG, false);
+        verify(channel, never()).basicNack(anyLong(), anyBoolean(), anyBoolean());
     }
 
     @Test
     void anUnknownTypeIsAckedAndIgnored() throws Exception {
         listener.onMessage(message(event("TipoNuevo", 1, "{}")), channel);
 
-        verifyNoInteractions(registeredHandler, updatedHandler, locationUpdatedHandler,
-                openingStatusChangedHandler, versionStore);
+        verifyNoInteractions(registeredHandler, updatedHandler, openingStatusChangedHandler, versionStore);
+        verifyAckedOnly();
+    }
+
+    @Test
+    void theEnglishNamesOfTheOldContractAreNotProcessed() throws Exception {
+        listener.onMessage(message(event("HuariqueRegistered", 1, OPEN_SNAPSHOT)), channel);
+
+        verifyNoInteractions(registeredHandler, updatedHandler, openingStatusChangedHandler, versionStore);
         verifyAckedOnly();
     }
 
@@ -201,11 +233,20 @@ class BusinessEventListenerTest {
     }
 
     @Test
-    void aPayloadMissingRequiredFieldsGoesStraightToTheDlq() throws Exception {
-        listener.onMessage(message(event("HuariqueRegistered", 1, "{ \"status\": \"ACTIVE\" }")), channel);
+    void aDataMissingRequiredFieldsGoesStraightToTheDlq() throws Exception {
+        listener.onMessage(message(event("HuariqueRegistrado", 1, "{ \"openStatus\": \"OPEN\" }")), channel);
 
         verifyNoInteractions(registeredHandler);
         verify(versionStore, never()).writeVersion(any(), anyLong());
+        verifyNackedToDlqOnly();
+        assertThat(sleeps).isEmpty();
+    }
+
+    @Test
+    void anUnsupportedSchemaVersionGoesStraightToTheDlq() throws Exception {
+        listener.onMessage(message(registered(1).replace("\"schemaVersion\": 1", "\"schemaVersion\": 2")), channel);
+
+        verifyNoInteractions(registeredHandler);
         verifyNackedToDlqOnly();
         assertThat(sleeps).isEmpty();
     }
@@ -265,7 +306,7 @@ class BusinessEventListenerTest {
     void anInterruptedWaitLeavesTheMessageUnackedSoItIsRedelivered() throws Exception {
         BusinessEventListener interrupted = new BusinessEventListener(
                 new BusinessEventParser(new ObjectMapper().findAndRegisterModules()), registeredHandler,
-                updatedHandler, locationUpdatedHandler, openingStatusChangedHandler, versionStore,
+                updatedHandler, openingStatusChangedHandler, versionStore,
                 new EventRetryProperties(3, 100, 2.0), millis -> {
                     throw new InterruptedException();
                 });
@@ -286,7 +327,7 @@ class BusinessEventListenerTest {
     void aSingleAttemptConfigurationNeverSleeps() throws Exception {
         BusinessEventListener oneAttempt = new BusinessEventListener(
                 new BusinessEventParser(new ObjectMapper().findAndRegisterModules()), registeredHandler,
-                updatedHandler, locationUpdatedHandler, openingStatusChangedHandler, versionStore,
+                updatedHandler, openingStatusChangedHandler, versionStore,
                 new EventRetryProperties(1, 100, 2.0), sleeps::add);
         doThrow(new IllegalStateException("redis caído")).when(registeredHandler).handle(any());
 

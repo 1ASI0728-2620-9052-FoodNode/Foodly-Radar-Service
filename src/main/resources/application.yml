@@ -1,5 +1,5 @@
 # Toda la configuración se lee de variables de entorno.
-# Perfil por defecto: sin valores locales; REDIS_URL, RABBITMQ_URL y JWT_SECRET son obligatorias.
+# Perfil por defecto: sin valores locales; REDIS_URL, RABBITMQ_URL y JWT_SECRET_BASE64 son obligatorias.
 # Perfil "local": dependencias en Docker Compose (ver el segundo documento).
 
 spring:
@@ -20,7 +20,7 @@ spring:
         default-requeue-rejected: false
 
 server:
-  port: ${SERVER_PORT:8080}
+  port: ${SERVER_PORT:8082}
 
 management:
   endpoints:
@@ -37,6 +37,8 @@ radar:
     resolution: ${RADAR_H3_RESOLUTION:9}
   max-k-ring: ${RADAR_MAX_K_RING:5}
   events:
+    # Exchange topic durable donde Business publica (business.<Tipo>); Radar enlaza su cola a él.
+    exchange: ${BUSINESS_EVENTS_EXCHANGE:foodly.business}
     # Reintento en memoria de un evento antes de mandarlo a la DLQ.
     max-attempts: ${RADAR_EVENTS_MAX_ATTEMPTS:3}
     initial-backoff-ms: ${RADAR_EVENTS_INITIAL_BACKOFF_MS:200}
@@ -46,8 +48,12 @@ radar:
     command-timeout-ms: ${REDIS_COMMAND_TIMEOUT_MS:2000}
   security:
     jwt:
-      # Mismo secreto que usa IAM para firmar (mínimo 32 bytes, se usa como texto UTF-8).
-      secret: ${JWT_SECRET}
+      # Misma clave que usa IAM para firmar (JWT_SECRET_BASE64): Base64 estándar, se decodifica a bytes
+      # (mínimo 32), igual que JwtTokenIssuer de IAM. No tiene valor por defecto: solo por entorno.
+      secret-base64: ${JWT_SECRET_BASE64}
+      # iss exacto y aud que debe incluir este valor (contrato JWT v1 de IAM).
+      issuer: ${JWT_ISSUER:foodly-iam}
+      audience: ${JWT_AUDIENCE:foodly-radar}
       user-id-claim: ${JWT_USER_ID_CLAIM:sub}
       role-claim: ${JWT_ROLE_CLAIM:role}
 
@@ -62,7 +68,3 @@ spring:
 radar:
   redis:
     url: ${REDIS_URL:redis://localhost:6379}
-  security:
-    jwt:
-      # Solo para desarrollo local. No usar fuera del perfil "local".
-      secret: ${JWT_SECRET:local-dev-only-secret-change-me-0123456789}

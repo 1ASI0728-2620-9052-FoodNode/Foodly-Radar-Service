@@ -4,14 +4,23 @@ import java.util.Arrays;
 import java.util.Optional;
 
 /**
- * Eventos de Business que Radar procesa (4.2.5, 5.3.4). Cualquier otro tipo, incluido {@code MenuUpdated},
- * se confirma y se ignora.
+ * Eventos de Business v1 que Radar procesa. El nombre del evento es el de Business (en español, decisión del
+ * equipo); los eventos y handlers internos de Radar conservan sus nombres en inglés solo como mapeo interno:
+ *
+ * <ul>
+ *   <li>{@code HuariqueRegistrado} -> {@code HuariqueRegisteredEvent} -> UpsertHuariqueLocationCommand</li>
+ *   <li>{@code PerfilDelHuariqueActualizado} -> {@code HuariqueUpdatedEvent} -> UpsertHuariqueLocationCommand
+ *       (el cambio de ubicación llega dentro del snapshot de este evento)</li>
+ *   <li>{@code EstadoAbiertoCerradoCambiado} -> {@code OpeningStatusChangedEvent} ->
+ *       ChangeHuariqueAvailabilityCommand</li>
+ * </ul>
+ *
+ * Cualquier otro tipo ({@code MenuCreado}, {@code MenuActualizado}...) se confirma y se ignora.
  */
 public enum BusinessEventType {
-    HUARIQUE_REGISTERED("HuariqueRegistered"),
-    HUARIQUE_UPDATED("HuariqueUpdated"),
-    LOCATION_UPDATED("LocationUpdated"),
-    OPENING_STATUS_CHANGED("OpeningStatusChanged");
+    HUARIQUE_REGISTERED("HuariqueRegistrado"),
+    HUARIQUE_UPDATED("PerfilDelHuariqueActualizado"),
+    OPENING_STATUS_CHANGED("EstadoAbiertoCerradoCambiado");
 
     private final String eventType;
 
@@ -19,8 +28,14 @@ public enum BusinessEventType {
         this.eventType = eventType;
     }
 
+    /** Nombre del evento tal como lo publica Business (campo {@code type} del sobre). */
     public String eventType() {
         return eventType;
+    }
+
+    /** Routing key con la que Business publica el evento: {@code business.<Tipo>}. */
+    public String routingKey() {
+        return RabbitMQConfig.ROUTING_KEY_PREFIX + eventType;
     }
 
     public static Optional<BusinessEventType> fromEventType(String eventType) {

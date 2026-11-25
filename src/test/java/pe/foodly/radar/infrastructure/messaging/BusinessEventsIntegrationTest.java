@@ -35,7 +35,9 @@ import pe.foodly.radar.domain.services.IH3IndexService;
 import pe.foodly.radar.support.TestJwt;
 
 /**
- * Radar completo contra un RabbitMQ y un Redis reales. Se omite si no hay Docker.
+ * Radar completo contra un RabbitMQ y un Redis reales, con eventos en el formato de Business v1
+ * ({@code foodly.business}, routing keys {@code business.<Tipo>}, sobre con {@code aggregateVersion} y
+ * {@code data}). Se omite si no hay Docker.
  *
  * <p>Los eventos se procesan de uno en uno y en orden (prefetch 1, un solo consumidor). Por eso, para saber que un
  * mensaje ya se procesó se publica después un huarique «centinela» y se espera a que aparezca en Redis.
@@ -43,6 +45,8 @@ import pe.foodly.radar.support.TestJwt;
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest
 class BusinessEventsIntegrationTest {
+
+    private static final String EXCHANGE = RabbitMQConfig.DEFAULT_BUSINESS_EVENTS_EXCHANGE;
 
     @Container
     static final GenericContainer<?> REDIS =
@@ -56,15 +60,22 @@ class BusinessEventsIntegrationTest {
         registry.add("radar.redis.url", () -> "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
         registry.add("spring.rabbitmq.addresses",
                 () -> "amqp://guest:guest@" + RABBIT.getHost() + ":" + RABBIT.getAmqpPort());
-        registry.add("radar.security.jwt.secret", () -> TestJwt.SECRET);
+        registry.add("radar.security.jwt.secret-base64", () -> TestJwt.SECRET_BASE64);
         // Espera corta entre reintentos para que la prueba de fallos no tarde.
         registry.add("radar.events.initial-backoff-ms", () -> "20");
     }
 
-    private static final String MIRAFLORES = """
-            { "latitude": -12.1219, "longitude": -77.0297, "status": "ACTIVE" }""";
-    private static final String BARRANCO = """
-            { "latitude": -12.1498, "longitude": -77.0207, "status": "ACTIVE" }""";
+    /** Snapshot de Business (data): lleva más campos de los que Radar usa. */
+    private static String snapshot(String openStatus, double latitude, double longitude) {
+        return """
+                { "id": "h", "ownerId": "owner-1", "name": "El Huarique", "address": "Lima 123",
+                  "cuisineType": "CRIOLLA", "priceRange": { "minimum": 10, "maximum": 50 },
+                  "location": { "latitude": %s, "longitude": %s }, "openStatus": "%s",
+                  "tags": [], "openingHours": [], "images": [], "version": 0 }""".formatted(latitude, longitude, openStatus);
+    }
+
+    private static final String MIRAFLORES = snapshot("OPEN", -12.1219, -77.0297);
+    private static final String BARRANCO = snapshot("OPEN", -12.1498, -77.0207);
 
     private final AtomicInteger sentinelCounter = new AtomicInteger();
 
@@ -88,11 +99,11 @@ class BusinessEventsIntegrationTest {
 
     // ---- utilidades ----
 
-    private static String envelope(String eventId, String eventType, String huariqueId, long version, String payload) {
+    private static String envelope(String eventId, String type, String huariqueId, long aggregateVersion, String data) {
         return """
-                { "eventId": "%s", "eventType": "%s", "huariqueId": "%s", "version": %d,
-                  "occurredAt": "2026-11-13T12:00:00Z", "payload": %s }""".formatted(eventId, eventType, huariqueId,
-                version, payload);
+                { "eventId": "%s", "type": "%s", "schemaVersion": 1, "huariqueId": "%s", "aggregateVersion": %d,
+                  "occurredAt": "2026-11-24T20:00:00.123Z", "data": %s }""".formatted(eventId, type, huariqueId,
+                aggregateVersion, data);
     }
 
     private void publish(String routingKey, String body) {
@@ -100,17 +111,28 @@ class BusinessEventsIntegrationTest {
         properties.setContentType("application/json");
         Message message = MessageBuilder.withBody(body.getBytes(StandardCharsets.UTF_8))
                 .andProperties(properties).build();
-        rabbitTemplate.send(RabbitMQConfig.BUSINESS_EVENTS_EXCHANGE, routingKey, message);
+        rabbitTemplate.send(EXCHANGE, routingKey, message);
     }
 
-    private void publishRegistered(String eventId, String huariqueId, long version, String payload) {
-        publish(RabbitMQConfig.HUARIQUE_REGISTERED_KEY, envelope(eventId, "HuariqueRegistered", huariqueId, version, payload));
+    private void publishRegistered(String eventId, String huariqueId, long aggregateVersion, String data) {
+        publish(RabbitMQConfig.HUARIQUE_REGISTERED_KEY,
+                envelope(eventId, "HuariqueRegistrado", huariqueId, aggregateVersion, data));
+    }
+
+    private void publishUpdated(String eventId, String huariqueId, long aggregateVersion, String data) {
+        publish(RabbitMQConfig.HUARIQUE_UPDATED_KEY,
+                envelope(eventId, "PerfilDelHuariqueActualizado", huariqueId, aggregateVersion, data));
+    }
+
+    private void publishStatusChanged(String eventId, String huariqueId, long aggregateVersion, String data) {
+        publish(RabbitMQConfig.OPENING_STATUS_CHANGED_KEY,
+                envelope(eventId, "EstadoAbiertoCerradoCambiado", huariqueId, aggregateVersion, data));
     }
 
     /** Publica un huarique centinela y espera a que se indexe: todo lo publicado antes ya fue procesado. */
     private void awaitEverythingPublishedSoFarIsProcessed() {
         String sentinel = "sentinel-" + sentinelCounter.incrementAndGet();
-        publishRegistered("e-" + sentinel, sentinel, 1, MIRAFLORES);
+        publishRegistered("e-" + sentinel, sentinel, 0, MIRAFLORES);
         await().atMost(Duration.ofSeconds(20)).untilAsserted(
                 () -> assertThat(redis.hasKey(huariqueKey(new HuariqueId(sentinel)))).isTrue());
     }
@@ -137,6 +159,30 @@ class BusinessEventsIntegrationTest {
     private int queueDepth() {
         var info = rabbitAdmin.getQueueInfo(RabbitMQConfig.QUEUE);
         return info == null ? -1 : info.getMessageCount();
+    }
+
+    // ---- aggregateVersion empieza en 0 ----
+
+    @Test
+    void theFirstEventWithAggregateVersionZeroIsApplied() {
+        publishRegistered("e-0", "first-1", 0, MIRAFLORES);
+        awaitEverythingPublishedSoFarIsProcessed();
+
+        assertThat(hash("first-1")).containsEntry("version", "0").containsEntry("status", "ACTIVE")
+                .containsEntry("lat", "-12.1219");
+        assertThat(rabbitTemplate.receive(RabbitMQConfig.DEAD_LETTER_QUEUE)).isNull();
+    }
+
+    @Test
+    void theSameVersionZeroEventPublishedAgainIsDiscarded() {
+        publishRegistered("e-0", "first-2", 0, MIRAFLORES);
+        awaitEverythingPublishedSoFarIsProcessed();
+        Map<Object, Object> afterFirst = hash("first-2");
+
+        publishRegistered("e-0", "first-2", 0, snapshot("CLOSED", -12.1498, -77.0207));
+        awaitEverythingPublishedSoFarIsProcessed();
+
+        assertThat(hash("first-2")).isEqualTo(afterFirst);
     }
 
     // ---- idempotencia ----
@@ -167,8 +213,7 @@ class BusinessEventsIntegrationTest {
         awaitEverythingPublishedSoFarIsProcessed();
         Map<Object, Object> current = hash("h-1");
 
-        publish(RabbitMQConfig.HUARIQUE_UPDATED_KEY, envelope("e-3", "HuariqueUpdated", "h-1", 3,
-                "{ \"latitude\": -12.1498, \"longitude\": -77.0207, \"status\": \"INACTIVE\" }"));
+        publishUpdated("e-3", "h-1", 3, snapshot("CLOSED", -12.1498, -77.0207));
         awaitEverythingPublishedSoFarIsProcessed();
 
         assertThat(hash("h-1")).isEqualTo(current);
@@ -179,42 +224,46 @@ class BusinessEventsIntegrationTest {
 
     @Test
     void aNewerVersionIsApplied() {
-        publishRegistered("e-1", "h-1", 1, MIRAFLORES);
-        publish(RabbitMQConfig.HUARIQUE_UPDATED_KEY, envelope("e-2", "HuariqueUpdated", "h-1", 2,
-                "{ \"latitude\": -12.1219, \"longitude\": -77.0297, \"status\": \"INACTIVE\" }"));
+        publishRegistered("e-1", "h-1", 0, MIRAFLORES);
+        publishUpdated("e-2", "h-1", 1, snapshot("CLOSED", -12.1219, -77.0297));
         awaitEverythingPublishedSoFarIsProcessed();
 
-        assertThat(hash("h-1")).containsEntry("status", "INACTIVE").containsEntry("version", "2");
+        assertThat(hash("h-1")).containsEntry("status", "INACTIVE").containsEntry("version", "1");
     }
 
-    // ---- cambio de ubicación ----
+    // ---- cambio de ubicación (llega dentro de PerfilDelHuariqueActualizado) ----
 
     @Test
-    void locationUpdatedMovesTheHuariqueToTheNewCell() {
+    void aProfileUpdateWithANewLocationMovesTheHuariqueToTheNewCell() {
         H3Cell miraflores = cellOf(-12.1219, -77.0297);
         H3Cell barranco = cellOf(-12.1498, -77.0207);
         assertThat(miraflores).isNotEqualTo(barranco);
 
-        publishRegistered("e-1", "h-1", 1, MIRAFLORES);
+        publishRegistered("e-1", "h-1", 0, MIRAFLORES);
         awaitEverythingPublishedSoFarIsProcessed();
         assertThat(members(miraflores)).contains("h-1");
 
-        publish(RabbitMQConfig.LOCATION_UPDATED_KEY, envelope("e-2", "LocationUpdated", "h-1", 2, BARRANCO));
+        publishUpdated("e-2", "h-1", 1, BARRANCO);
         awaitEverythingPublishedSoFarIsProcessed();
 
         assertThat(hash("h-1")).containsEntry("h3Cell", barranco.index()).containsEntry("lat", "-12.1498")
-                .containsEntry("version", "2");
+                .containsEntry("version", "1");
         assertThat(members(barranco)).contains("h-1");
         assertThat(members(miraflores)).doesNotContain("h-1");
     }
 
     @Test
-    void openingStatusChangedFlipsTheAvailability() {
-        publishRegistered("e-1", "h-1", 1, MIRAFLORES);
-        publish(RabbitMQConfig.OPENING_STATUS_CHANGED_KEY,
-                envelope("e-2", "OpeningStatusChanged", "h-1", 2, "{ \"isOpen\": false }"));
+    void openAndClosedFlipTheAvailability() {
+        publishRegistered("e-1", "h-1", 0, snapshot("CLOSED", -12.1219, -77.0297));
         awaitEverythingPublishedSoFarIsProcessed();
+        assertThat(hash("h-1")).containsEntry("status", "INACTIVE");
 
+        publishStatusChanged("e-2", "h-1", 1, snapshot("OPEN", -12.1219, -77.0297));
+        awaitEverythingPublishedSoFarIsProcessed();
+        assertThat(hash("h-1")).containsEntry("status", "ACTIVE").containsEntry("version", "1");
+
+        publishStatusChanged("e-3", "h-1", 2, snapshot("CLOSED", -12.1219, -77.0297));
+        awaitEverythingPublishedSoFarIsProcessed();
         assertThat(hash("h-1")).containsEntry("status", "INACTIVE").containsEntry("version", "2")
                 .containsEntry("lat", "-12.1219");
     }
@@ -238,8 +287,7 @@ class BusinessEventsIntegrationTest {
 
     @Test
     void aValidJsonWithMissingFieldsAlsoEndsUpInTheDeadLetterQueue() {
-        publish(RabbitMQConfig.HUARIQUE_REGISTERED_KEY,
-                envelope("e-1", "HuariqueRegistered", "h-1", 1, "{ \"status\": \"ACTIVE\" }"));
+        publishRegistered("e-1", "h-1", 1, "{ \"openStatus\": \"OPEN\" }");
 
         assertThat(rabbitTemplate.receive(RabbitMQConfig.DEAD_LETTER_QUEUE, 15_000)).isNotNull();
         assertThat(redis.hasKey(huariqueKey(new HuariqueId("h-1")))).isFalse();
@@ -248,8 +296,7 @@ class BusinessEventsIntegrationTest {
     @Test
     void anEventThatKeepsFailingIsRetriedAndThenGoesToTheDeadLetterQueue() {
         // El huarique no está indexado: ChangeHuariqueAvailability falla en cada intento.
-        publish(RabbitMQConfig.OPENING_STATUS_CHANGED_KEY,
-                envelope("e-1", "OpeningStatusChanged", "ghost", 1, "{ \"status\": \"INACTIVE\" }"));
+        publishStatusChanged("e-1", "ghost", 1, "{ \"openStatus\": \"CLOSED\" }");
 
         assertThat(rabbitTemplate.receive(RabbitMQConfig.DEAD_LETTER_QUEUE, 15_000)).isNotNull();
         assertThat(redis.hasKey(huariqueKey(new HuariqueId("ghost")))).isFalse();
@@ -258,9 +305,20 @@ class BusinessEventsIntegrationTest {
     // ---- tipos que Radar no procesa ----
 
     @Test
-    void menuUpdatedIsAckedAndIgnored() {
-        // MenuUpdated no está enlazado a la cola de Radar; si llegara por otro binding, se confirma y se ignora.
-        publish(RabbitMQConfig.HUARIQUE_UPDATED_KEY, envelope("e-1", "MenuUpdated", "h-1", 1, "{ \"platos\": [] }"));
+    void menuEventsAreNotRoutedToTheRadarQueue() {
+        // MenuCreado y MenuActualizado no están enlazados a la cola de Radar: ni llegan ni dejan huella.
+        publish("business.MenuCreado", envelope("e-1", "MenuCreado", "h-1", 0, "{ \"categories\": [] }"));
+        publish("business.MenuActualizado", envelope("e-2", "MenuActualizado", "h-1", 1, "{ \"categories\": [] }"));
+        awaitEverythingPublishedSoFarIsProcessed();
+
+        assertThat(redis.hasKey(huariqueKey(new HuariqueId("h-1")))).isFalse();
+        assertThat(rabbitTemplate.receive(RabbitMQConfig.DEAD_LETTER_QUEUE)).isNull();
+        assertThat(queueDepth()).isZero();
+    }
+
+    @Test
+    void aMenuEventThatReachesTheQueueByAnotherBindingIsAckedAndIgnored() {
+        publish(RabbitMQConfig.HUARIQUE_UPDATED_KEY, envelope("e-1", "MenuActualizado", "h-1", 1, "{ \"categories\": [] }"));
         awaitEverythingPublishedSoFarIsProcessed();
 
         assertThat(redis.hasKey(huariqueKey(new HuariqueId("h-1")))).isFalse();
@@ -282,16 +340,14 @@ class BusinessEventsIntegrationTest {
     }
 
     @Test
-    void eachOfTheFourRoutingKeysReachesTheRadarQueue() {
-        publish(RabbitMQConfig.HUARIQUE_REGISTERED_KEY, envelope("e-1", "HuariqueRegistered", "k-1", 1, MIRAFLORES));
-        publish(RabbitMQConfig.HUARIQUE_UPDATED_KEY, envelope("e-2", "HuariqueUpdated", "k-1", 2, MIRAFLORES));
-        publish(RabbitMQConfig.LOCATION_UPDATED_KEY, envelope("e-3", "LocationUpdated", "k-1", 3, BARRANCO));
-        publish(RabbitMQConfig.OPENING_STATUS_CHANGED_KEY,
-                envelope("e-4", "OpeningStatusChanged", "k-1", 4, "{ \"status\": \"INACTIVE\" }"));
+    void eachOfTheThreeRoutingKeysReachesTheRadarQueue() {
+        publishRegistered("e-1", "k-1", 0, MIRAFLORES);
+        publishUpdated("e-2", "k-1", 1, BARRANCO);
+        publishStatusChanged("e-3", "k-1", 2, snapshot("CLOSED", -12.1498, -77.0207));
         awaitEverythingPublishedSoFarIsProcessed();
 
-        // Versión 4 = el último de los cuatro eventos se aplicó, así que ninguno se perdió ni se desvió.
-        assertThat(hash("k-1")).containsEntry("version", "4").containsEntry("status", "INACTIVE")
+        // Versión 2 = el último de los tres eventos se aplicó, así que ninguno se perdió ni se desvió.
+        assertThat(hash("k-1")).containsEntry("version", "2").containsEntry("status", "INACTIVE")
                 .containsEntry("lat", "-12.1498");
         assertThat(rabbitTemplate.receive(RabbitMQConfig.DEAD_LETTER_QUEUE)).isNull();
     }

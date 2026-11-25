@@ -14,7 +14,6 @@ import pe.foodly.radar.application.commands.ChangeHuariqueAvailabilityCommand;
 import pe.foodly.radar.application.commands.UpsertHuariqueLocationCommand;
 import pe.foodly.radar.application.events.HuariqueRegisteredEvent;
 import pe.foodly.radar.application.events.HuariqueUpdatedEvent;
-import pe.foodly.radar.application.events.LocationUpdatedEvent;
 import pe.foodly.radar.application.events.OpeningStatusChangedEvent;
 import pe.foodly.radar.domain.model.valueobjects.AvailabilityStatus;
 
@@ -45,16 +44,6 @@ class BusinessEventHandlersTest {
 
         verify(upsertHandler).handle(
                 new UpsertHuariqueLocationCommand("h-1", -12.1300, -77.0300, AvailabilityStatus.INACTIVE));
-        verifyNoMoreInteractions(upsertHandler);
-    }
-
-    @Test
-    void locationUpdatedExecutesTheUpsertCommandWithTheNewCoordinates() {
-        new LocationUpdatedEventHandler(upsertHandler).handle(
-                new LocationUpdatedEvent("e-3", "h-1", 3, NOW, -12.1498, -77.0207, AvailabilityStatus.ACTIVE));
-
-        verify(upsertHandler).handle(
-                new UpsertHuariqueLocationCommand("h-1", -12.1498, -77.0207, AvailabilityStatus.ACTIVE));
         verifyNoMoreInteractions(upsertHandler);
     }
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # PR-05: Radar caído mientras Business sigue publicando eventos.
 #
-#   1. Indexa 20 huariques (línea base, versión 1).
+#   1. Indexa 20 huariques (línea base, aggregateVersion 0).
 #   2. Detiene Radar («docker compose stop radar») y registra la hora de la falla.
-#   3. Publica 20 eventos (LocationUpdated y OpeningStatusChanged, versión 2) con Radar caído:
+#   3. Publica 20 eventos (PerfilDelHuariqueActualizado y EstadoAbiertoCerradoCambiado, aggregateVersion 1) con
+#      Radar caído:
 #      deben esperar en la cola durable.
 #   4. Levanta Radar, registra la hora de la recuperación y verifica que se aplicaron 20 de 20.
 #   5. Republica los mismos 20 eventos y verifica que Redis no cambió (0 duplicados).
@@ -78,8 +79,8 @@ queue_ready_is() { [ "$(queue_stat "$QUEUE" messages_ready)" = "$1" ]; }
 queue_is_empty() {
   [ "$(queue_stat "$QUEUE" messages_ready)" = "0" ] && [ "$(queue_stat "$QUEUE" messages_unacknowledged)" = "0" ]
 }
-applied_is_complete() { [ "$(count_with_version 2)" = "$EXPECTED" ]; }
-baseline_is_complete() { [ "$(count_with_version 1)" = "$EXPECTED" ]; }
+applied_is_complete() { [ "$(count_with_version 1)" = "$EXPECTED" ]; }
+baseline_is_complete() { [ "$(count_with_version 0)" = "$EXPECTED" ]; }
 discarded_logs() { compose logs radar --no-log-prefix 2>/dev/null | grep -c 'Descartado: la versión' || true; }
 discards_reached() { [ "$(discarded_logs)" -ge "$1" ]; }
 
@@ -93,13 +94,13 @@ publish_round() {
     if [ $((i % 2)) -eq 1 ]; then
       # Impares: el dueño cambia las coordenadas (el huarique se mueve de celda si cruza el límite).
       new_lat=$(awk -v x="$lat" 'BEGIN { printf "%.4f", x + 0.0010 }')
-      publish "$ROUTING_LOCATION_UPDATED" "$(location_updated_event "$id" "$new_lat" "$lng" "$status" 2)"
-      printf '%s|2|%s|%s\n' "$id" "$(norm "$new_lat")" "$status" >>"$WORK_DIR/expected"
+      publish "$ROUTING_UPDATED" "$(profile_updated_event "$id" "$new_lat" "$lng" "$status" 1)"
+      printf '%s|1|%s|%s\n' "$id" "$(norm "$new_lat")" "$status" >>"$WORK_DIR/expected"
     else
       # Pares: el huarique abre o cierra.
       if [ "$status" = "ACTIVE" ]; then new_status=INACTIVE; else new_status=ACTIVE; fi
-      publish "$ROUTING_OPENING_STATUS" "$(opening_status_event "$id" "$new_status" 2)"
-      printf '%s|2|%s|%s\n' "$id" "$(norm "$lat")" "$new_status" >>"$WORK_DIR/expected"
+      publish "$ROUTING_OPENING_STATUS" "$(opening_status_event "$id" "$lat" "$lng" "$new_status" 1)"
+      printf '%s|1|%s|%s\n' "$id" "$(norm "$lat")" "$new_status" >>"$WORK_DIR/expected"
     fi
   done
   LC_ALL=C sort -o "$WORK_DIR/expected" "$WORK_DIR/expected"
@@ -119,7 +120,7 @@ curl -fsS -u "$RABBIT_USER:$RABBIT_PASSWORD" -X DELETE "$MGMT_URL/api/queues/$VH
 cleanup_seed
 
 # --- 1. Línea base ---
-log "1/6 Línea base: $EXPECTED eventos HuariqueRegistered (versión 1)"
+log "1/6 Línea base: $EXPECTED eventos HuariqueRegistrado (aggregateVersion 0)"
 for row in "${SEED_HUARIQUES[@]}"; do
   IFS='|' read -r id district lat lng status <<<"$row"
   publish "$ROUTING_REGISTERED" "$(registered_event "$id" "$lat" "$lng" "$status")"
@@ -134,7 +135,7 @@ FAIL_EPOCH=$(epoch); FAIL_TIME=$(stamp)
 log "    FALLA: Radar detenido a las $FAIL_TIME."
 
 # --- 3. Eventos con Radar caído ---
-log "3/6 Publicando $EXPECTED eventos (LocationUpdated y OpeningStatusChanged, versión 2) con Radar caído..."
+log "3/6 Publicando $EXPECTED eventos (PerfilDelHuariqueActualizado y EstadoAbiertoCerradoCambiado, aggregateVersion 1) con Radar caído..."
 publish_round
 wait_until queue_ready_is "$EXPECTED" || true
 QUEUED=$(queue_stat "$QUEUE" messages_ready)
@@ -144,7 +145,7 @@ check "los $EXPECTED eventos esperan en la cola durable mientras Radar está ca�
   "$([ "$QUEUED" = "$EXPECTED" ] && echo 0 || echo 1)" "mensajes en cola: $QUEUED"
 check "no hay consumidores mientras Radar está caído" "$([ "$CONSUMERS" = "0" ] && echo 0 || echo 1)" "consumidores: $CONSUMERS"
 check "Redis no cambió mientras Radar estuvo caído" \
-  "$([ "$(count_with_version 2)" = "0" ] && echo 0 || echo 1)" "huariques ya en versión 2: $(count_with_version 2)"
+  "$([ "$(count_with_version 1)" = "0" ] && echo 0 || echo 1)" "huariques ya en versión 1: $(count_with_version 1)"
 
 # --- 4. Recuperación ---
 log "4/6 Levantando Radar..."
@@ -153,7 +154,7 @@ UP_EPOCH=$(epoch); UP_TIME=$(stamp)
 log "    RECUPERACIÓN: Radar iniciado a las $UP_TIME."
 wait_until applied_is_complete || true
 DONE_EPOCH=$(epoch)
-APPLIED=$(count_with_version 2)
+APPLIED=$(count_with_version 1)
 log "    Eventos aplicados: $APPLIED de $EXPECTED."
 
 actual_fields >"$WORK_DIR/actual"

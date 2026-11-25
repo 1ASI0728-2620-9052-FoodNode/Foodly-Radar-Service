@@ -56,7 +56,7 @@ class RadarServiceApplicationIntegrationTest {
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         registry.add("radar.redis.url", () -> "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
-        registry.add("radar.security.jwt.secret", () -> TestJwt.SECRET);
+        registry.add("radar.security.jwt.secret-base64", () -> TestJwt.SECRET_BASE64);
         // Esta prueba no usa RabbitMQ: el listener no arranca y no intenta conectarse.
         registry.add("spring.rabbitmq.addresses", () -> "amqp://guest:guest@localhost:5672");
         registry.add("spring.rabbitmq.listener.simple.auto-startup", () -> "false");

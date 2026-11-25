@@ -27,11 +27,11 @@ WORKDIR /app
 COPY --from=build --chown=radar:radar /build/app.jar /app/app.jar
 USER radar:radar
 
-EXPOSE 8080
+EXPOSE 8082
 
 # El 503 de /actuator/health (Redis o RabbitMQ caídos) marca el contenedor como unhealthy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD curl -fsS "http://localhost:${SERVER_PORT:-8080}/actuator/health" || exit 1
+    CMD curl -fsS "http://localhost:${SERVER_PORT:-8082}/actuator/health" || exit 1
 
 # La memoria se ajusta al límite del contenedor.
 ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-jar", "/app/app.jar"]

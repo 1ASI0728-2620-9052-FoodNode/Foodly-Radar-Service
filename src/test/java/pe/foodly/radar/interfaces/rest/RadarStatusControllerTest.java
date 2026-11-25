@@ -21,7 +21,9 @@ import pe.foodly.radar.support.TestJwt;
 @WebMvcTest(RadarStatusController.class)
 @Import(SecurityConfig.class)
 @TestPropertySource(properties = {
-        "radar.security.jwt.secret=" + TestJwt.SECRET,
+        "radar.security.jwt.secret-base64=" + TestJwt.SECRET_BASE64,
+        "radar.security.jwt.issuer=" + TestJwt.ISSUER,
+        "radar.security.jwt.audience=" + TestJwt.AUDIENCE,
         "radar.security.jwt.user-id-claim=sub",
         "radar.security.jwt.role-claim=role"})
 class RadarStatusControllerTest {

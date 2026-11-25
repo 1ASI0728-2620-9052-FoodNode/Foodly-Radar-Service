@@ -10,18 +10,19 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 import pe.foodly.radar.application.eventhandlers.HuariqueRegisteredEventHandler;
 import pe.foodly.radar.application.eventhandlers.HuariqueUpdatedEventHandler;
-import pe.foodly.radar.application.eventhandlers.LocationUpdatedEventHandler;
 import pe.foodly.radar.application.eventhandlers.OpeningStatusChangedEventHandler;
 import pe.foodly.radar.domain.model.valueobjects.HuariqueId;
 import pe.foodly.radar.infrastructure.persistence.redis.HuariqueVersionStore;
 
 /**
- * Escucha la cola durable de Radar y deriva cada evento de Business a su handler (5.2.4).
+ * Escucha la cola durable de Radar y deriva cada evento de Business v1 a su handler (5.2.4).
  *
  * <ol>
  *   <li>Deserializa el sobre. Si no se puede leer, va a la DLQ sin reintentos.</li>
- *   <li>Un tipo que Radar no procesa (por ejemplo {@code MenuUpdated}) se confirma y se registra en debug.</li>
- *   <li>Si la {@code version} del evento es menor o igual a la del hash, se descarta y se confirma.</li>
+ *   <li>Un tipo que Radar no procesa (por ejemplo {@code MenuCreado} o {@code MenuActualizado}) se confirma y se
+ *       registra en debug.</li>
+ *   <li>Si la {@code aggregateVersion} del evento es menor o igual a la del hash, se descarta y se confirma.
+ *       La primera versión de un huarique es 0 y se aplica: sin versión guardada nada es obsoleto.</li>
  *   <li>Si no, delega en el handler del tipo, guarda la nueva versión y recién entonces confirma (ack manual).</li>
  *   <li>Si el procesamiento falla se reintenta en memoria, con espera creciente. Al agotar los intentos,
  *       {@code basicNack(requeue=false)} y el mensaje pasa a la Dead Letter Queue.</li>
@@ -38,7 +39,6 @@ public class BusinessEventListener {
     private final BusinessEventParser parser;
     private final HuariqueRegisteredEventHandler registeredHandler;
     private final HuariqueUpdatedEventHandler updatedHandler;
-    private final LocationUpdatedEventHandler locationUpdatedHandler;
     private final OpeningStatusChangedEventHandler openingStatusChangedHandler;
     private final HuariqueVersionStore versionStore;
     private final EventRetryProperties retry;
@@ -47,7 +47,6 @@ public class BusinessEventListener {
     public BusinessEventListener(BusinessEventParser parser,
                                  HuariqueRegisteredEventHandler registeredHandler,
                                  HuariqueUpdatedEventHandler updatedHandler,
-                                 LocationUpdatedEventHandler locationUpdatedHandler,
                                  OpeningStatusChangedEventHandler openingStatusChangedHandler,
                                  HuariqueVersionStore versionStore,
                                  EventRetryProperties retry,
@@ -55,7 +54,6 @@ public class BusinessEventListener {
         this.parser = parser;
         this.registeredHandler = registeredHandler;
         this.updatedHandler = updatedHandler;
-        this.locationUpdatedHandler = locationUpdatedHandler;
         this.openingStatusChangedHandler = openingStatusChangedHandler;
         this.versionStore = versionStore;
         this.retry = retry;
@@ -76,12 +74,12 @@ public class BusinessEventListener {
         }
 
         String context = "[eventId=" + envelope.eventId() + " huariqueId=" + envelope.huariqueId() + "]";
-        log.info("{} Recibido {} (version {}).", context, envelope.eventType(), envelope.version());
+        log.info("{} Recibido {} (aggregateVersion {}).", context, envelope.type(), envelope.aggregateVersion());
 
-        Optional<BusinessEventType> type = BusinessEventType.fromEventType(envelope.eventType());
+        Optional<BusinessEventType> type = BusinessEventType.fromEventType(envelope.type());
         if (type.isEmpty()) {
             log.debug("{} Tipo de evento '{}' no lo procesa Radar: se confirma y se ignora.",
-                    context, envelope.eventType());
+                    context, envelope.type());
             channel.basicAck(deliveryTag, false);
             return;
         }
@@ -94,7 +92,7 @@ public class BusinessEventListener {
             log.warn("{} Procesamiento interrumpido; el mensaje se reentregará.", context);
             return;
         } catch (RuntimeException e) {
-            log.error("{} No se pudo procesar {}; va a la DLQ.", context, envelope.eventType(), e);
+            log.error("{} No se pudo procesar {}; va a la DLQ.", context, envelope.type(), e);
             channel.basicNack(deliveryTag, false, false);
             return;
         }
@@ -142,7 +140,6 @@ public class BusinessEventListener {
         switch (type) {
             case HUARIQUE_REGISTERED -> registeredHandler.handle(parser.toRegistered(envelope));
             case HUARIQUE_UPDATED -> updatedHandler.handle(parser.toUpdated(envelope));
-            case LOCATION_UPDATED -> locationUpdatedHandler.handle(parser.toLocationUpdated(envelope));
             case OPENING_STATUS_CHANGED ->
                     openingStatusChangedHandler.handle(parser.toOpeningStatusChanged(envelope));
         }
